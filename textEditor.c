@@ -1,4 +1,12 @@
 /*** includes ***/
+// https://viewsourcecode.org/snaptoken/kilo/04.aTextViewer.html#multiple-lines
+// not loading text file correctly
+
+
+
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
 
 #include <ctype.h> 
 #include <errno.h>
@@ -30,10 +38,18 @@ enum editorKey {
 };
 
 /*** data ***/
+
+typedef struct erow {
+  int size;
+  char *chars;
+} erow;
+
 struct settings {
   int cx, cy; //cursor position
   int screenrows;
   int screencols;
+  int numrows;
+  erow row;
   struct termios origTermios;
 };
 
@@ -206,6 +222,31 @@ if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
   }
 }
 
+/*** file i/o ***/
+
+void editorOpen(char *filename) {
+  FILE *fp = fopen(filename, "r");
+  if (!fp) 
+    die("fopen");
+  char *line = NULL;
+  size_t linecap = 0;
+  ssize_t linelen;
+  linelen = getline(&line, &linecap, fp);
+  
+  if (linelen != -1) {
+    while (linelen > 0 && (line[linelen - 1] == '\n' ||
+                           line[linelen - 1] == '\r'))
+      linelen--;
+    E.row.size = linelen;
+    E.row.chars = malloc(linelen + 1);
+    memcpy(E.row.chars, line, linelen);
+    E.row.chars[linelen] = '\0';
+    E.numrows = 1;
+  }
+  free(line);
+  fclose(fp);
+}
+
 
 /*** append buffer ***/
 // this is a dynamic string type to update the screen all at once, instead of 
@@ -246,8 +287,8 @@ void abFree(struct abuf *ab) {
 void editorDrawRows(struct abuf *ab) {
   int y;
   for (y = 0; y < E.screenrows; y++) {
-    
-    if(y == E.screenrows / 3){
+    if(y>=E.numrows){
+        if (E.numrows == 0 && y == E.screenrows / 3) {
       char welcome[80];
       int welcomelen = snprintf(welcome, sizeof(welcome),
         "Text Editor -- version %s", TEXTEDITOR_VERSION);
@@ -264,7 +305,13 @@ void editorDrawRows(struct abuf *ab) {
     } else {
       abAppend(ab, "~", 1);
     
-    }
+    } 
+    } else {
+        int len = E.row.size;
+        if (len > E.screencols) len = E.screencols;
+        abAppend(ab, E.row.chars, len);
+      }
+    
     abAppend(ab, "\x1b[K",3); //erases the rest of the line after the tilda
     
     if(y<E.screenrows - 1){
@@ -362,13 +409,20 @@ void editorProcessKeypress() {
 void initEditor() {
   E.cx = 0;
   E.cy = 0; 
+  E.numrows = 0;
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) 
     die("getWindowSize");
 }
 
-int main() {
+int main( int argc, char *argv[] ) {
   enableRawMode();
   initEditor();
+
+  if( argc >= 2){
+	  printf(argv[1]);
+    editorOpen(argv[1]);
+  }
+  
 while (1) {
     editorRefreshScreen();
     editorProcessKeypress();    
