@@ -1,6 +1,3 @@
-// working on https://viewsourcecode.org/snaptoken/kilo/03.rawInputAndOutput.html#the-page-up-and-page-down-keys
-
-
 /*** includes ***/
 
 #include <ctype.h> 
@@ -8,8 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h> //get window size
-#include <termios.h>
+#include <sys/ioctl.h> // Window Size 
+#include <termios.h>   // Terminal I/O
 #include <unistd.h>
 
 /*** defines ***/
@@ -24,18 +21,23 @@ enum editorKey {
   ARROW_LEFT = 1000,
   ARROW_RIGHT,
   ARROW_UP,
-  ARROW_DOWN
+  ARROW_DOWN,
+  DEL_KEY,
+  PAGE_UP,
+  PAGE_DOWN,
+  HOME_KEY,
+  END_KEY
 };
 
 /*** data ***/
-struct editorConfig {
+struct settings {
   int cx, cy; //cursor position
   int screenrows;
   int screencols;
-  struct termios orig_termios;
+  struct termios origTermios;
 };
 
-struct editorConfig E;
+struct settings E;
 
 
 /*** terminal ***/
@@ -49,17 +51,17 @@ void die(const char *s) {
 
 void disableRawMode() {
   // checks our library calls for failure, calls die if they fail
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1)
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.origTermios) == -1)
     die("tcsetattr");
   
 }
 void enableRawMode() {
   //save the current console settings. if an error occurs, exit program
-  if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) 
+  if (tcgetattr(STDIN_FILENO, &E.origTermios) == -1) 
     die("tcgetattr");
 
   atexit(disableRawMode);                 // disable raw mode when the program exits
-  struct termios raw = E.orig_termios;      // store the console settings into raw
+  struct termios raw = E.origTermios;      // store the console settings into raw
   
   // disables echoing keypresses
   // enable canonical mode to read input byte-by-byte instead of line-by-line
@@ -104,24 +106,50 @@ int editorReadKey() {
   //the user has pressed cntl+chr
   if (c == '\x1b') {
     char seq[3];
-    //check to see if the next 
+    //check to see if the next characters are blank
     if (read(STDIN_FILENO, &seq[0], 1) != 1) 
       return '\x1b';
     if (read(STDIN_FILENO, &seq[1], 1) != 1) 
       return '\x1b';
+    
+    //we have encountered an escape sequence 
     if (seq[0] == '[') {
-      switch (seq[1]) {
-        case 'A': return ARROW_UP;
-        case 'B': return ARROW_DOWN;
-        case 'C': return ARROW_RIGHT;
-        case 'D': return ARROW_LEFT;
+          if (seq[1] >= '0' && seq[1] <= '9') {
+            if (read(STDIN_FILENO, &seq[2], 1) != 1) 
+            	return '\x1b';
+            //we have encountered a home/end/page key (multiple possible escape characters for these)
+            if (seq[2] == '~') {
+              switch (seq[1]) {
+              case '1': return HOME_KEY;
+              case '3': return DEL_KEY;
+              case '4': return END_KEY;
+			  case '5': return PAGE_UP;
+			  case '6': return PAGE_DOWN;
+			  case '7': return HOME_KEY;
+			  case '8': return END_KEY;
+              }
+            }
+          } else {
+            switch (seq[1]) {
+              case 'A': return ARROW_UP;
+              case 'B': return ARROW_DOWN;
+              case 'C': return ARROW_RIGHT;
+              case 'D': return ARROW_LEFT;
+              case 'H': return HOME_KEY;
+              case 'F': return END_KEY;
+            }
+          }
+        } else if (seq[0] == 'O') {
+            switch (seq[1]) {
+              case 'H': return HOME_KEY;
+              case 'F': return END_KEY;
+            }
+        }
+        return '\x1b';
+      } else {
+        return c;
       }
     }
-    return '\x1b';
-  } else {
-    return c;
-  }
-}
 
 // on success returns 
 int getCursorPosition(int *rows, int *cols) {
@@ -262,7 +290,7 @@ void editorRefreshScreen() {
   abAppend(&ab, buf, strlen(buf));
 
 
-  abAppend(&ab, "\x1b[?25h", 6); //enables the cursor while printing to screen
+  abAppend(&ab, "\x1b[?25h", 6); //re-enables the cursor after printing to screen
 
   write(STDOUT_FILENO, ab.b, ab.len); //resets cursor to top of page
   abFree(&ab);
@@ -295,6 +323,8 @@ void editorMoveCursor(int key) {
   }
 }
 
+
+
 //processes input from keypresses
 void editorProcessKeypress() {
   int c = editorReadKey();
@@ -306,6 +336,18 @@ void editorProcessKeypress() {
       write(STDOUT_FILENO, "\x1b[H", 3);
       exit(0);
       break;
+    case HOME_KEY:
+      E.cx = 0;
+      break;
+    case END_KEY:
+      E.cx = E.screencols - 1;
+      break;
+    case PAGE_UP:
+      E.cy = 0;
+      break;
+    case PAGE_DOWN:
+      E.cy = E.screenrows-1;
+   
     case ARROW_UP:
     case ARROW_DOWN:
     case ARROW_LEFT:
@@ -318,7 +360,7 @@ void editorProcessKeypress() {
 /*** init ***/
 
 void initEditor() {
-  E.cx = 10;
+  E.cx = 0;
   E.cy = 0; 
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) 
     die("getWindowSize");
