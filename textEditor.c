@@ -1,5 +1,4 @@
-// https://viewsourcecode.org/snaptoken/kilo/04.aTextViewer.html#vertical-scrolling
-// cursor does not work well with tabs!
+// https://viewsourcecode.org/snaptoken/kilo/05.aTextEditor.html#quit-confirmation
 /*** includes ***/
 
 #define _DEFAULT_SOURCE
@@ -69,6 +68,7 @@ struct settings {
   char statusmsg[80]; // status message for the menu bar
   time_t statusmsg_time; // time the status message was printed
   struct termios origTermios;
+  int dirty;      // a file is dirty (1) if it has unsaved changes, 0 otherwise
 };
 
 struct settings E;
@@ -303,6 +303,7 @@ void editorAppendRow(char *s, size_t len) {
 	editorUpdateRow(&E.row[at]);
 	
 	E.numrows++;
+	E.dirty++;
 }
 
 // insert a character into a row
@@ -317,6 +318,7 @@ void editorRowInsertChar(erow *row, int at, int c) {
   row->size++;
   row->chars[at] = c;
   editorUpdateRow(row);
+  E.dirty++;
 }
 
 /*** editor operations ***/
@@ -372,9 +374,11 @@ void editorOpen(char *filename) {
         linelen--;
       editorAppendRow(line, linelen);
     }
-    free(line);
-    fclose(fp);
-  }
+  free(line);
+  fclose(fp);
+  // file is just opened, not dirty!
+  E.dirty = 0; 
+}
 
 // saves the file
 void editorSave() {
@@ -392,8 +396,10 @@ void editorSave() {
         if (write(fd, buf, len) == len) {
         	close(fd);
         	free(buf);
+            // file is saved correctly, not dirty
+        	E.dirty = 0;
             editorSetStatusMessage("%d bytes written to disk", len);
-        	return;
+            return;
         }
 	  }
 	  close(fd); // error occured, close file
@@ -524,8 +530,9 @@ void editorDrawStatusBar(struct abuf *ab) {
   abAppend(ab, "\x1b[7m", 4);
   char status[80], rstatus[80];
   // prints the file name and number of lines
-  int len = snprintf(status, sizeof(status), "%.20s - %d lines",
-    E.filename ? E.filename : "[No File Opened]", E.numrows);
+  int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
+      E.filename ? E.filename : "[No File Name]", E.numrows,
+      E.dirty ? "(modified)" : "");
 
   // print the current line on the right side of the screen
   int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",
@@ -739,6 +746,8 @@ void initEditor() {
   
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
+  
+  E.dirty = 0;
   
   // determines how many rows/cols the terminal can display
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) 
