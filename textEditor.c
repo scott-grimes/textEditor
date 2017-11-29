@@ -1,3 +1,12 @@
+/***
+ * 
+ * A Simple Text Editor in C
+ * By: Scott Grimes
+ * 
+ * Based on the Kilo Text Editor
+ * ***/
+
+
 /*** includes ***/
 
 #define _DEFAULT_SOURCE
