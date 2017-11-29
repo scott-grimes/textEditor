@@ -1,6 +1,3 @@
-
-// https://viewsourcecode.org/snaptoken/kilo/04.aTextViewer.html#vertical-scrolling
-// cursor does not work well with tabs!
 /*** includes ***/
 
 #define _DEFAULT_SOURCE
@@ -9,8 +6,10 @@
 
 #include <ctype.h> 
 #include <errno.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <sys/ioctl.h> // Window Size 
 #include <termios.h>   // Terminal I/O
@@ -48,12 +47,16 @@ typedef struct erow {
 
 struct settings {
   int cx, cy; 	  //cursor position in the file on row cy, column cx
+  int rx;         // index in the render field (used to deal with cursor hopping over tabs)
   int rowoff;     // what row in a file is the user currently on (top of screen)
   int coloff;     // offset for columns, used to display wide files
   int screenrows; // how many rows to display on the screen
   int screencols; // how many cols to display
   int numrows;    // number of rows in the file
   erow *row;	  // pointer to the rows of our files
+  char *filename; // the name of the file we are looking at
+  char statusmsg[80]; // status message for the menu bar
+  time_t statusmsg_time; // time the status message was printed
   struct termios origTermios;
 };
 
@@ -229,6 +232,19 @@ if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
 
 /*** row operations ***/
 
+// determines where to place the cursor, taking into account any tabs
+// on the row
+int editorRowCxToRx(erow *row, int cx) {
+  int rx = 0;
+  int j;
+  for (j = 0; j < cx; j++) {
+    if (row->chars[j] == '\t')
+      rx += (TAB_STOP - 1) - (rx % TAB_STOP);
+    rx++;
+  }
+  return rx;
+}
+
 // render string is filled with characters from *row
 // tabs are replaced with multiple space characters
 void editorUpdateRow(erow *row) {
@@ -281,6 +297,9 @@ void editorAppendRow(char *s, size_t len) {
 
 // opens a file, passed as the first arg when running the program
 void editorOpen(char *filename) {
+  free(E.filename);
+  E.filename = strdup(filename);
+  
   FILE *fp = fopen(filename, "r");
   if (!fp) 
     die("fopen");
@@ -337,17 +356,22 @@ void abFree(struct abuf *ab) {
 // and modify col offset to scroll left/right 
 // boundries check to make sure you don't scroll off screen!
 void editorScroll() {
+  E.rx = 0;
+  if (E.cy < E.numrows) {
+      E.rx = editorRowCxToRx(&E.row[E.cy], E.cx);
+  }
+  
   if (E.cy < E.rowoff) {
     E.rowoff = E.cy;
   }
   if (E.cy >= E.rowoff + E.screenrows) {
     E.rowoff = E.cy - E.screenrows + 1;
   }
-  if (E.cx < E.coloff) {
-      E.coloff = E.cx;
+  if (E.rx < E.coloff) {
+      E.coloff = E.rx;
   }
-  if (E.cx >= E.coloff + E.screencols) {
-      E.coloff = E.cx - E.screencols + 1;
+  if (E.rx >= E.coloff + E.screencols) {
+      E.coloff = E.rx - E.screencols + 1;
   }
 }
 
@@ -412,14 +436,43 @@ void editorDrawRows(struct abuf *ab) {
 void editorDrawStatusBar(struct abuf *ab) {
   // <esc>[7M inverts the colors for our status bar
   abAppend(ab, "\x1b[7m", 4);
-  int len = 0;
-  // draw stuff
+  char status[80], rstatus[80];
+  // prints the file name and number of lines
+  int len = snprintf(status, sizeof(status), "%.20s - %d lines",
+    E.filename ? E.filename : "[No File Opened]", E.numrows);
+
+  // print the current line on the right side of the screen
+  int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",
+    E.cy + 1, E.numrows);
+  
+  if (len > E.screencols) 
+	len = E.screencols;
+  abAppend(ab, status, len);
+  // draw our status line
   while (len < E.screencols) {
-    abAppend(ab, " ", 1);
-    len++;
+    if (E.screencols - len == rlen) {
+      abAppend(ab, rstatus, rlen);
+	  break;
+	} else {
+      abAppend(ab, " ", 1);
+      len++;
+    }
   }
   // <esc>[M returns our color scheme to normal
   abAppend(ab, "\x1b[m", 3);
+  // add a row below our status bar to display any status messages
+  abAppend(ab, "\r\n",2);
+}
+
+void editorDrawMessageBar(struct abuf *ab) {
+  // clear the row
+  abAppend(ab, "\x1b[K", 3);
+  // add our message
+  int msglen = strlen(E.statusmsg);
+  if (msglen > E.screencols) msglen = E.screencols;
+  // only draw the message if it is less than 5 sec old!
+  if (msglen && time(NULL) - E.statusmsg_time < 5)
+    abAppend(ab, E.statusmsg, msglen);
 }
 
 void editorRefreshScreen() {
@@ -438,12 +491,13 @@ void editorRefreshScreen() {
   // add enough rows to fill the screen to ab
   editorDrawRows(&ab);
   
-  // add the status bar to the end of ab
+  // add the status bar and message bars to the end of ab
   editorDrawStatusBar(&ab);
+  editorDrawMessageBar(&ab);
   
   // sets the cursor position on the screen to our stored value (cx,cy)
   char buf[32];
-  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.cx - E.coloff) + 1);
+  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.rx - E.coloff) + 1);
   abAppend(&ab, buf, strlen(buf));
 
   // re-enables the cursor after printing to screen
@@ -457,7 +511,14 @@ void editorRefreshScreen() {
   
 }
 
-
+// sets the status message on the menu bar
+void editorSetStatusMessage(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(E.statusmsg, sizeof(E.statusmsg), fmt, ap);
+  va_end(ap);
+  E.statusmsg_time = time(NULL);
+}
 
 
 /*** input ***/
@@ -562,17 +623,24 @@ void initEditor() {
   // sets cursor to top left of screen
   E.cx = 0;
   E.cy = 0; 
+  E.rx = 0;
   
   E.rowoff = 0;
   E.coloff = 0;
   E.numrows = 0;
   E.row = NULL;
+  E.filename = NULL;
+  
+  E.statusmsg[0] = '\0';
+  E.statusmsg_time = 0;
   
   // determines how many rows/cols the terminal can display
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) 
     die("getWindowSize");
-  // leave the last row of our terminal free to display a status bar
-  E.screenrows -= 1;
+  
+  // the second-to-last row of our terminal is free to display a status bar
+  // the last row will display any messages to the user
+  E.screenrows -= 2;
 }
 
 int main( int argc, char *argv[] ) {
@@ -583,6 +651,9 @@ int main( int argc, char *argv[] ) {
   if( argc >= 2){
     editorOpen(argv[1]);
   }
+  
+  // initial status message
+  editorSetStatusMessage("HELP: Ctrl-Q = quit");
   
 while (1) {
     editorRefreshScreen();
