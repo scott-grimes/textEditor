@@ -1,3 +1,5 @@
+// https://viewsourcecode.org/snaptoken/kilo/04.aTextViewer.html#vertical-scrolling
+// cursor does not work well with tabs!
 /*** includes ***/
 
 #define _DEFAULT_SOURCE
@@ -10,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <fcntl.h>    // write and create files
 #include <string.h>
 #include <sys/ioctl.h> // Window Size 
 #include <termios.h>   // Terminal I/O
@@ -24,7 +27,9 @@
 /// bitwise AND with 00011111, equiv to stripping the first 3 bits, what ctrl does
 #define CTRL_KEY(k) ((k) & 0x1f)
 
-enum editorKey {
+
+enum editorKey {  
+  BACKSPACE = 127,
   ARROW_LEFT = 1000,
   ARROW_RIGHT,
   ARROW_UP,
@@ -35,6 +40,12 @@ enum editorKey {
   HOME_KEY,
   END_KEY
 };
+
+
+/*** prototypes ***/
+// function declarations here avoid implicit compile errors
+
+void editorSetStatusMessage(const char *fmt, ...);
 
 /*** data ***/
 
@@ -230,6 +241,8 @@ if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
   }
 }
 
+
+
 /*** row operations ***/
 
 // determines where to place the cursor, taking into account any tabs
@@ -292,8 +305,54 @@ void editorAppendRow(char *s, size_t len) {
 	E.numrows++;
 }
 
+// insert a character into a row
+void editorRowInsertChar(erow *row, int at, int c) {
+  // make sure the index is valid (allowed to be at the end of the row!)
+  if (at < 0 || at > row->size) 
+    at = row->size;
+  // add two characters to our row (the new character, plus a null byte
+  row->chars = realloc(row->chars, row->size + 2);
+  // move the characters after the insertion index over one
+  memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
+  row->size++;
+  row->chars[at] = c;
+  editorUpdateRow(row);
+}
+
+/*** editor operations ***/
+
+// adds a chacter to the file at the current cursor location
+void editorInsertChar(int c) {
+  // if the cursor is at the bottom, add a new row
+  if (E.cy == E.numrows) {
+    editorAppendRow("", 0);
+  }
+  // insert the character at the position, then increment the cursor one
+  editorRowInsertChar(&E.row[E.cy], E.cx, c);
+  E.cx++;
+}
+
 
 /*** file i/o ***/
+
+// converts our array of rows into a string for writing to a file
+char *convertRowsToString(int *buflen) {
+  int totlen = 0;
+  int j;
+  // add up the lenghts of each row, plus 1 for the newline char on each row
+  for (j = 0; j < E.numrows; j++)
+    totlen += E.row[j].size + 1;
+  *buflen = totlen;
+  char *buf = malloc(totlen);
+  char *p = buf;
+  for (j = 0; j < E.numrows; j++) {
+    memcpy(p, E.row[j].chars, E.row[j].size);
+    p += E.row[j].size;
+    *p = '\n';
+    p++;
+  }
+  return buf;
+}
 
 // opens a file, passed as the first arg when running the program
 void editorOpen(char *filename) {
@@ -316,6 +375,33 @@ void editorOpen(char *filename) {
     free(line);
     fclose(fp);
   }
+
+// saves the file
+void editorSave() {
+  if (E.filename == NULL) 
+    return;
+  int len;
+  // get a string to write to the new file
+  char *buf = convertRowsToString(&len);
+  // open the file, or create a new file with the correct file name
+  // the owner gets r/w access, other people only get read access with permission code 0644
+  int fd = open(E.filename, O_RDWR | O_CREAT, 0644);
+  if (fd != -1) {
+	  // shortens the file size to exactly the required length
+	  if (ftruncate(fd, len) != -1) {
+        if (write(fd, buf, len) == len) {
+        	close(fd);
+        	free(buf);
+            editorSetStatusMessage("%d bytes written to disk", len);
+        	return;
+        }
+	  }
+	  close(fd); // error occured, close file
+  }
+  free(buf); // error occured, free memory
+  editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
+}
+
 
 
 /*** append buffer ***/
@@ -576,18 +662,31 @@ void editorProcessKeypress() {
   int c = editorReadKey();
 
   switch (c) {
+    case '\r':
+	  break;
+	  
     case CTRL_KEY('q'):
       // if user presses ctrl+q, exit the program
       write(STDOUT_FILENO, "\x1b[2J", 4); // clears the screen <esc>[2J
       write(STDOUT_FILENO, "\x1b[H", 3);  // sets cursor to top left <esc>[1;1H
       exit(0);							  // exits program without error
       break;
+      
+    case CTRL_KEY('s'):
+      editorSave();
+      break;
+          
     case HOME_KEY:
       E.cx = 0;
       break;
     case END_KEY:
       if (E.cy < E.numrows)
         E.cx = E.row[E.cy].size;
+      break;
+    case BACKSPACE:
+    case CTRL_KEY('h'):
+    case DEL_KEY:
+      /* TODO */
       break;
     // page up/down positions cursor at top/bottom of screen, then calls
     // one screen's worth of up/down arrow presses
@@ -612,6 +711,13 @@ void editorProcessKeypress() {
     case ARROW_LEFT:
     case ARROW_RIGHT:
       editorMoveCursor(c);
+      break;
+    // disables the refresh <ctrl>+l keypair and any excape sequences
+    case CTRL_KEY('l'):
+    case '\x1b':
+      break;
+    default:
+      editorInsertChar(c);
       break;
   }
 }
@@ -653,9 +759,9 @@ int main( int argc, char *argv[] ) {
   }
   
   // initial status message
-  editorSetStatusMessage("HELP: Ctrl-Q = quit");
-  
-while (1) {
+  editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit");
+
+  while (1) {
     editorRefreshScreen();
     editorProcessKeypress();    
     
