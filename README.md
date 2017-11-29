@@ -1,2 +1,3 @@
 # textEditor
-A simple text editor written in c++, based on the kilo text editor
+A simple text editor written in C, based on the kilo text editor
+![Screenshot](screenshot.jpg?raw=true "Screenshot")
